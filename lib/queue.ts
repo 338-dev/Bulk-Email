@@ -5,12 +5,9 @@ import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
 import process from 'process';
+import { emailQueueStorage } from './jsonStorage';
 
-// This file acts as our in-memory database and service layer.
-
-let recipients: Recipient[] = [];
-let statuses: StatusMap = {};
-let isSendingProcessActive = false;
+// This file acts as our persistent database and service layer using JSON files.
 
 // --- Nodemailer Setup ---
 // Credentials and paths are loaded from environment variables for security.
@@ -100,68 +97,161 @@ const sendMailLogic = async (recipient: Recipient): Promise<{ success: boolean }
   }
 };
 
-
+/**
+ * Get the current state of the email queue from JSON storage
+ */
 export const getQueueState = () => {
-console.log(recipients);
-console.log(fs.existsSync(RESUME_PATH), RESUME_PATH)
-  return {
-    recipients: [...recipients],
-    statuses: { ...statuses },
-    isSending: isSendingProcessActive,
-  };
+  const state = emailQueueStorage.getQueueState();
+  console.log('Current recipients:', state.recipients);
+  console.log('Resume file exists:', fs.existsSync(RESUME_PATH), 'Path:', RESUME_PATH);
+  return state;
 };
 
-export const addRecipients = (newRecipients: Omit<Recipient, 'id'>[]) => {
-  const existingEmails = new Set(recipients.map(r => r.email.toLowerCase()));
-  const uniqueNewRecipients = newRecipients
-    .filter(r => !existingEmails.has(r.email.toLowerCase()))
-    .map(r => ({ ...r, id: r.email.toLowerCase() }));
-
-  recipients = [...recipients, ...uniqueNewRecipients];
-
-  for (const recipient of uniqueNewRecipients) {
-    statuses[recipient.id] = SendStatus.PENDING;
-  }
-  return { success: true };
+/**
+ * Add new recipients to the queue via JSON storage
+ */
+export const addRecipients = async (newRecipients: Omit<Recipient, 'id'>[]) => {
+  return await emailQueueStorage.addRecipients(newRecipients);
 };
 
-export const processQueue = () => {
-  if (isSendingProcessActive) {
+/**
+ * Process the email queue using JSON storage for persistence
+ */
+export const processQueue = async () => {
+  const isSending = emailQueueStorage.isSendingActive();
+  const recipients = emailQueueStorage.getRecipients();
+
+  if (isSending) {
     return { success: false, message: 'A send process is already running.' };
   }
+  
   if (recipients.length === 0) {
-      return { success: false, message: 'The queue is empty.' };
+    return { success: false, message: 'The queue is empty.' };
   }
 
-  isSendingProcessActive = true;
+  // Set sending flag to true
+  const lockSuccess = await emailQueueStorage.setSendingActive(true);
+  if (!lockSuccess) {
+    return { success: false, message: 'Could not acquire processing lock.' };
+  }
 
   // This part runs in the background and does not block the API response
   (async () => {
-    const recipientsToSend = [...recipients];
+    try {
+      const recipientsToSend = emailQueueStorage.getRecipients();
 
-    for (const recipient of recipientsToSend) {
-      if (statuses[recipient.id] === SendStatus.PENDING) {
-        statuses[recipient.id] = SendStatus.SENDING;
-        const result = await sendMailLogic(recipient);
-        statuses[recipient.id] = result.success ? SendStatus.SENT : SendStatus.FAILED;
+      for (const recipient of recipientsToSend) {
+        const currentStatuses = emailQueueStorage.getStatuses();
+        
+        if (currentStatuses[recipient.id] === SendStatus.PENDING) {
+          // Update status to SENDING
+          await emailQueueStorage.updateRecipientStatus(recipient.id, SendStatus.SENDING);
+          
+          // Attempt to send email
+          const result = await sendMailLogic(recipient);
+          
+          // Update final status
+          const finalStatus = result.success ? SendStatus.SENT : SendStatus.FAILED;
+          await emailQueueStorage.updateRecipientStatus(recipient.id, finalStatus);
+        }
       }
-    }
 
-    // After a delay to let the UI show final statuses, clean up the queue
-    setTimeout(() => {
-      const failedRecipients = recipients.filter(r => statuses[r.id] === SendStatus.FAILED);
-      const remainingStatuses: StatusMap = {};
+      // After a delay to let the UI show final statuses, clean up the queue
+      setTimeout(async () => {
+        await emailQueueStorage.cleanupQueue();
+        console.log('Email queue processing completed and cleaned up.');
+      }, 3000); // 3-second delay for the user to see the final statuses
       
-      failedRecipients.forEach(r => {
-        // Reset failed to pending for a potential retry
-        remainingStatuses[r.id] = SendStatus.PENDING;
-      });
-
-      recipients = failedRecipients;
-      statuses = remainingStatuses;
-      isSendingProcessActive = false;
-    }, 3000); // 3-second delay for the user to see the final statuses
+    } catch (error) {
+      console.error('Error during email processing:', error);
+      await emailQueueStorage.setSendingActive(false);
+    }
   })();
 
   return { success: true, message: 'Email sending process initiated.' };
+};
+
+// Additional utility functions for better queue management
+
+/**
+ * Clear all data from the queue
+ */
+export const clearQueue = async () => {
+  const success = await emailQueueStorage.clearAllData();
+  return { success, message: success ? 'Queue cleared successfully' : 'Failed to clear queue' };
+};
+
+/**
+ * Get queue statistics
+ */
+export const getQueueStats = () => {
+  const state = emailQueueStorage.getQueueState();
+  const statuses = state.statuses;
+  
+  const stats = {
+    total: state.recipients.length,
+    pending: 0,
+    sending: 0,
+    sent: 0,
+    failed: 0,
+    isSending: state.isSending
+  };
+
+  Object.values(statuses).forEach(status => {
+    switch (status) {
+      case SendStatus.PENDING:
+        stats.pending++;
+        break;
+      case SendStatus.SENDING:
+        stats.sending++;
+        break;
+      case SendStatus.SENT:
+        stats.sent++;
+        break;
+      case SendStatus.FAILED:
+        stats.failed++;
+        break;
+    }
+  });
+
+  return stats;
+};
+
+/**
+ * Create a backup of the current queue state
+ */
+export const createQueueBackup = () => {
+  const backupPath = emailQueueStorage.createBackup();
+  return { 
+    success: !!backupPath, 
+    backupPath,
+    message: backupPath ? 'Backup created successfully' : 'Failed to create backup'
+  };
+};
+
+/**
+ * Reset failed emails to pending status for retry
+ */
+export const retryFailedEmails = async () => {
+  const state = emailQueueStorage.getQueueState();
+  const failedRecipients = state.recipients.filter(r => state.statuses[r.id] === SendStatus.FAILED);
+  
+  let updatedCount = 0;
+  for (const recipient of failedRecipients) {
+    const success = await emailQueueStorage.updateRecipientStatus(recipient.id, SendStatus.PENDING);
+    if (success) updatedCount++;
+  }
+
+  return {
+    success: updatedCount > 0,
+    message: `Reset ${updatedCount} failed emails to pending status`,
+    updatedCount
+  };
+};
+
+/**
+ * Get the path to the data file (useful for debugging)
+ */
+export const getDataFilePath = () => {
+  return emailQueueStorage.getDataFilePath();
 };

@@ -3,7 +3,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { addRecipients } from '../../lib/queue';
 import { Recipient } from '../../types';
 
-export default function handler(req: NextApiRequest, res: NextApiResponse) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'POST') {
     try {
       const newRecipients: Omit<Recipient, 'id'>[] = req.body;
@@ -12,7 +12,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         return res.status(400).json({ message: 'Request body must be a valid JSON array.' });
       }
 
-      const result = addRecipients(newRecipients);
+      const result = await addRecipients(newRecipients);
       if (result.success) {
         res.status(201).json({ success: true, message: 'Recipients added to the queue.' });
       } else {

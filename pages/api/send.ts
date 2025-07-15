@@ -2,10 +2,10 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { processQueue } from '../../lib/queue';
 
-export default function handler(req: NextApiRequest, res: NextApiResponse) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'POST') {
     try {
-      const result = processQueue();
+      const result = await processQueue();
       if (result.success) {
         // 202 Accepted: The request has been accepted for processing, but is not complete.
         res.status(202).json({ message: result.message });

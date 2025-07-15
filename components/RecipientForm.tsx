@@ -53,7 +53,9 @@ const RecipientForm: React.FC<RecipientFormProps> = ({ onAddRecipients, onError 
     }
 
     try {
-      const parsedData = JSON.parse(inputText);
+      const sanitizedInput = sanitizeJsonInput(inputText.trim());
+
+      const parsedData = JSON.parse(sanitizedInput);
       if (validateRecipients(parsedData)) {
         setIsAdding(true);
         // ID is now a backend concern. Await the async operation.
@@ -67,6 +69,23 @@ const RecipientForm: React.FC<RecipientFormProps> = ({ onAddRecipients, onError 
     } finally {
         setIsAdding(false);
     }
+  };
+
+  const sanitizeJsonInput = (input: any) => {
+    let sanitized = input;
+    
+    // Replace single quotes with double quotes for string values
+    // This regex matches 'value' but not property names
+    sanitized = sanitized.replace(/'([^']*?)'/g, '"$1"');
+    
+    // Add quotes around unquoted property names
+    // This regex matches property names that aren't already quoted
+    sanitized = sanitized.replace(/(\w+)(\s*):/g, '"$1"$2:');
+    
+    // Handle trailing commas (remove them)
+    sanitized = sanitized.replace(/,(\s*[}\]])/g, '$1');
+    
+    return sanitized;
   };
 
   return (
