@@ -1,0 +1,5 @@
+{
+  "name": "Bulk Email Sender",
+  "description": "An application to manage a list of recipients from a JSON input and simulate sending bulk emails. Add recipients in the specified format and send them with a single click.",
+  "requestFramePermissions": []
+}
