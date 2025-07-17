@@ -100,8 +100,8 @@ const sendMailLogic = async (recipient: Recipient): Promise<{ success: boolean }
 /**
  * Get the current state of the email queue from JSON storage
  */
-export const getQueueState = () => {
-  const state = emailQueueStorage.getQueueState();
+export const getQueueState = async () => {
+  const state = await emailQueueStorage.getQueueState();
   console.log('Current recipients:', state.recipients);
   console.log('Resume file exists:', fs.existsSync(RESUME_PATH), 'Path:', RESUME_PATH);
   return state;
@@ -118,8 +118,8 @@ export const addRecipients = async (newRecipients: Omit<Recipient, 'id'>[]) => {
  * Process the email queue using JSON storage for persistence
  */
 export const processQueue = async () => {
-  const isSending = emailQueueStorage.isSendingActive();
-  const recipients = emailQueueStorage.getRecipients();
+  const isSending = await emailQueueStorage.isSendingActive();
+  const recipients = await emailQueueStorage.getRecipients();
 
   if (isSending) {
     return { success: false, message: 'A send process is already running.' };
@@ -138,10 +138,10 @@ export const processQueue = async () => {
   // This part runs in the background and does not block the API response
   (async () => {
     try {
-      const recipientsToSend = emailQueueStorage.getRecipients();
+      const recipientsToSend = await emailQueueStorage.getRecipients();
 
       for (const recipient of recipientsToSend) {
-        const currentStatuses = emailQueueStorage.getStatuses();
+        const currentStatuses = await emailQueueStorage.getStatuses();
         
         if (currentStatuses[recipient.id] === SendStatus.PENDING) {
           // Update status to SENDING
@@ -184,8 +184,8 @@ export const clearQueue = async () => {
 /**
  * Get queue statistics
  */
-export const getQueueStats = () => {
-  const state = emailQueueStorage.getQueueState();
+export const getQueueStats = async () => {
+  const state = await emailQueueStorage.getQueueState();
   const statuses = state.statuses;
   
   const stats = {
@@ -220,8 +220,8 @@ export const getQueueStats = () => {
 /**
  * Create a backup of the current queue state
  */
-export const createQueueBackup = () => {
-  const backupPath = emailQueueStorage.createBackup();
+export const createQueueBackup = async () => {
+  const backupPath = await emailQueueStorage.createBackup();
   return { 
     success: !!backupPath, 
     backupPath,
@@ -233,7 +233,7 @@ export const createQueueBackup = () => {
  * Reset failed emails to pending status for retry
  */
 export const retryFailedEmails = async () => {
-  const state = emailQueueStorage.getQueueState();
+  const state = await emailQueueStorage.getQueueState();
   const failedRecipients = state.recipients.filter(r => state.statuses[r.id] === SendStatus.FAILED);
   
   let updatedCount = 0;

@@ -1,242 +1,302 @@
-// utils/jsonStorage.ts
-import fs from 'fs';
-import path from 'path';
-import { Recipient, StatusMap, SendStatus } from '../types';
-
-interface QueueData {
-  recipients: Recipient[];
-  statuses: StatusMap;
-  isSendingProcessActive: boolean;
-  lastUpdated: string;
-}
+// utils/sequelizeStorage.ts
+import { Op, Transaction } from 'sequelize';
+import { sequelize } from './db';
+import { Recipient, QueueState, initializeQueueState } from './model';
+import { Recipient as RecipientType, StatusMap, SendStatus } from '../types';
 
 class EmailQueueStorage {
-  private dataDir: string;
-  private dataFile: string;
-  private lockFile: string;
-  private defaultData: QueueData;
+  private initialized: boolean = false;
 
   constructor() {
-    this.dataDir = path.join(process.cwd(), 'data');
-    this.dataFile = path.join(this.dataDir, 'email-queue.json');
-    this.lockFile = path.join(this.dataDir, 'email-queue.lock');
-    this.defaultData = {
-      recipients: [],
-      statuses: {},
-      isSendingProcessActive: false,
-      lastUpdated: new Date().toISOString()
-    };
     this.initializeStorage();
   }
 
-  private initializeStorage(): void {
+  private async initializeStorage(): Promise<void> {
     try {
-      // Create data directory if it doesn't exist
-      if (!fs.existsSync(this.dataDir)) {
-        fs.mkdirSync(this.dataDir, { recursive: true });
-      }
-
-      // Create data file if it doesn't exist
-      if (!fs.existsSync(this.dataFile)) {
-        this.writeDataSync(this.defaultData);
-      }
-
-      // Clean up any stale lock files on startup
-      if (fs.existsSync(this.lockFile)) {
-        fs.unlinkSync(this.lockFile);
-      }
+      // Ensure database connection and models are ready
+      await sequelize.authenticate();
+      await sequelize.sync();
+      await initializeQueueState();
+      this.initialized = true;
+      console.log('Sequelize email queue storage initialized successfully.');
     } catch (error) {
-      console.error('Failed to initialize email queue storage:', error);
+      console.error('Failed to initialize Sequelize email queue storage:', error);
     }
   }
 
-  private async acquireLock(timeoutMs: number = 5000): Promise<boolean> {
-    const startTime = Date.now();
-    
-    while (Date.now() - startTime < timeoutMs) {
-      try {
-        // Try to create lock file (fails if exists)
-        fs.writeFileSync(this.lockFile, process.pid.toString(), { flag: 'wx' });
-        return true;
-      } catch (error) {
-        // Lock file exists, wait a bit and try again
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-    }
-    
-    console.warn('Failed to acquire lock for email queue storage');
-    return false;
-  }
-
-  private releaseLock(): void {
-    try {
-      if (fs.existsSync(this.lockFile)) {
-        fs.unlinkSync(this.lockFile);
-      }
-    } catch (error) {
-      console.error('Failed to release lock:', error);
-    }
-  }
-
-  private readDataSync(): QueueData {
-    try {
-      if (!fs.existsSync(this.dataFile)) {
-        return { ...this.defaultData };
-      }
-
-      const fileContent = fs.readFileSync(this.dataFile, 'utf8');
-      const data = JSON.parse(fileContent) as QueueData;
-      
-      // Validate data structure
-      if (!data.recipients || !data.statuses || typeof data.isSendingProcessActive !== 'boolean') {
-        console.warn('Invalid data structure, resetting to defaults');
-        return { ...this.defaultData };
-      }
-
-      return data;
-    } catch (error) {
-      console.error('Error reading email queue data:', error);
-      return { ...this.defaultData };
-    }
-  }
-
-  private writeDataSync(data: QueueData): boolean {
-    try {
-      data.lastUpdated = new Date().toISOString();
-      fs.writeFileSync(this.dataFile, JSON.stringify(data, null, 2));
-      return true;
-    } catch (error) {
-      console.error('Error writing email queue data:', error);
-      return false;
+  private async ensureInitialized(): Promise<void> {
+    if (!this.initialized) {
+      await this.initializeStorage();
     }
   }
 
   // Public methods for reading data
-  public getQueueState(): { recipients: Recipient[]; statuses: StatusMap; isSending: boolean } {
-    const data = this.readDataSync();
-    return {
-      recipients: [...data.recipients],
-      statuses: { ...data.statuses },
-      isSending: data.isSendingProcessActive
-    };
+  public async getQueueState(): Promise<{ recipients: RecipientType[]; statuses: StatusMap; isSending: boolean }> {
+    await this.ensureInitialized();
+    
+    try {
+      const [recipients, queueState] = await Promise.all([
+        Recipient.findAll({
+          order: [['createdAt', 'ASC']],
+        }),
+        QueueState.findByPk(1),
+      ]);
+
+      const recipientList: RecipientType[] = recipients.map(r => ({
+        id: r.id,
+        email: r.email,
+        name: r.name,
+        company: r.company,
+      }));
+
+      const statuses: StatusMap = {};
+      recipients.forEach(r => {
+        statuses[r.id] = r.status;
+      });
+
+      return {
+        recipients: recipientList,
+        statuses,
+        isSending: queueState?.isSendingProcessActive || false,
+      };
+    } catch (error) {
+      console.error('Error getting queue state:', error);
+      return { recipients: [], statuses: {}, isSending: false };
+    }
   }
 
-  public getRecipients(): Recipient[] {
-    const data = this.readDataSync();
-    return [...data.recipients];
+  public async getRecipients(): Promise<RecipientType[]> {
+    await this.ensureInitialized();
+    
+    try {
+      const recipients = await Recipient.findAll({
+        order: [['createdAt', 'ASC']],
+      });
+
+      return recipients.map(r => ({
+        id: r.id,
+        email: r.email,
+        name: r.name,
+        company: r.company,
+      }));
+    } catch (error) {
+      console.error('Error getting recipients:', error);
+      return [];
+    }
   }
 
-  public getStatuses(): StatusMap {
-    const data = this.readDataSync();
-    return { ...data.statuses };
+  public async getStatuses(): Promise<StatusMap> {
+    await this.ensureInitialized();
+    
+    try {
+      const recipients = await Recipient.findAll({
+        attributes: ['id', 'status'],
+      });
+
+      const statuses: StatusMap = {};
+      recipients.forEach(r => {
+        statuses[r.id] = r.status;
+      });
+
+      return statuses;
+    } catch (error) {
+      console.error('Error getting statuses:', error);
+      return {};
+    }
   }
 
-  public isSendingActive(): boolean {
-    const data = this.readDataSync();
-    return data.isSendingProcessActive;
+  public async isSendingActive(): Promise<boolean> {
+    await this.ensureInitialized();
+    
+    try {
+      const queueState = await QueueState.findByPk(1);
+      return queueState?.isSendingProcessActive || false;
+    } catch (error) {
+      console.error('Error checking sending status:', error);
+      return false;
+    }
   }
 
   // Public methods for updating data
-  public async addRecipients(newRecipients: Omit<Recipient, 'id'>[]): Promise<{ success: boolean; message?: string }> {
-    const lockAcquired = await this.acquireLock();
-    if (!lockAcquired) {
-      return { success: false, message: 'Could not acquire lock' };
-    }
-
+  public async addRecipients(newRecipients: Omit<RecipientType, 'id'>[]): Promise<{ success: boolean; message?: string }> {
+    await this.ensureInitialized();
+    
+    const transaction: Transaction = await sequelize.transaction();
+    
     try {
-      const data = this.readDataSync();
-      const existingEmails = new Set(data.recipients.map(r => r.email.toLowerCase()));
+      // Check for existing emails
+      const existingEmails = await Recipient.findAll({
+        where: {
+          email: {
+            [Op.in]: newRecipients.map(r => r.email.toLowerCase()),
+          },
+        },
+        attributes: ['email'],
+        transaction,
+      });
+
+      const existingEmailSet = new Set(existingEmails.map(r => r.email.toLowerCase()));
       
       const uniqueNewRecipients = newRecipients
-        .filter(r => !existingEmails.has(r.email.toLowerCase()))
-        .map(r => ({ ...r, id: r.email.toLowerCase() }));
+        .filter(r => !existingEmailSet.has(r.email.toLowerCase()))
+        .map(r => ({
+          id: r.email.toLowerCase(),
+          email: r.email,
+          name: r.name,
+          company: r.company,
+          status: SendStatus.PENDING,
+        }));
 
-      // Update recipients and statuses
-      data.recipients = [...data.recipients, ...uniqueNewRecipients];
-      
-      for (const recipient of uniqueNewRecipients) {
-        data.statuses[recipient.id] = SendStatus.PENDING;
+      if (uniqueNewRecipients.length === 0) {
+        await transaction.rollback();
+        return { success: true, message: 'No new recipients to add (all already exist)' };
       }
 
-      const success = this.writeDataSync(data);
-      return { success };
-    } finally {
-      this.releaseLock();
+      await Recipient.bulkCreate(uniqueNewRecipients, { transaction });
+      
+      // Update queue state last updated time
+      await QueueState.update(
+        { lastUpdated: new Date() },
+        { where: { id: 1 }, transaction }
+      );
+
+      await transaction.commit();
+      return { success: true, message: `Added ${uniqueNewRecipients.length} new recipients` };
+    } catch (error) {
+      await transaction.rollback();
+      console.error('Error adding recipients:', error);
+      return { success: false, message: 'Failed to add recipients' };
     }
   }
 
   public async updateRecipientStatus(recipientId: string, status: SendStatus): Promise<boolean> {
-    const lockAcquired = await this.acquireLock();
-    if (!lockAcquired) return false;
-
+    await this.ensureInitialized();
+    
     try {
-      const data = this.readDataSync();
-      data.statuses[recipientId] = status;
-      return this.writeDataSync(data);
-    } finally {
-      this.releaseLock();
+      const [updatedCount] = await Recipient.update(
+        { status },
+        { where: { id: recipientId } }
+      );
+
+      if (updatedCount > 0) {
+        // Update queue state last updated time
+        await QueueState.update(
+          { lastUpdated: new Date() },
+          { where: { id: 1 } }
+        );
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('Error updating recipient status:', error);
+      return false;
     }
   }
 
   public async setSendingActive(isActive: boolean): Promise<boolean> {
-    const lockAcquired = await this.acquireLock();
-    if (!lockAcquired) return false;
-
+    await this.ensureInitialized();
+    
     try {
-      const data = this.readDataSync();
-      data.isSendingProcessActive = isActive;
-      return this.writeDataSync(data);
-    } finally {
-      this.releaseLock();
+      const [updatedCount] = await QueueState.update(
+        { 
+          isSendingProcessActive: isActive,
+          lastUpdated: new Date()
+        },
+        { where: { id: 1 } }
+      );
+
+      return updatedCount > 0;
+    } catch (error) {
+      console.error('Error setting sending active status:', error);
+      return false;
     }
   }
 
   public async cleanupQueue(): Promise<boolean> {
-    const lockAcquired = await this.acquireLock();
-    if (!lockAcquired) return false;
-
+    await this.ensureInitialized();
+    
+    const transaction: Transaction = await sequelize.transaction();
+    
     try {
-      const data = this.readDataSync();
-      
-      // Keep only failed recipients for retry
-      const failedRecipients = data.recipients.filter(r => data.statuses[r.id] === SendStatus.FAILED);
-      const remainingStatuses: StatusMap = {};
-      
-      failedRecipients.forEach(r => {
-        // Reset failed to pending for a potential retry
-        remainingStatuses[r.id] = SendStatus.PENDING;
+      // Reset failed recipients to pending for retry, remove sent ones
+      await Recipient.update(
+        { status: SendStatus.PENDING },
+        { 
+          where: { status: SendStatus.FAILED },
+          transaction 
+        }
+      );
+
+      // Remove sent recipients
+      await Recipient.destroy({
+        where: { status: SendStatus.SENT },
+        transaction,
       });
 
-      data.recipients = failedRecipients;
-      data.statuses = remainingStatuses;
-      data.isSendingProcessActive = false;
+      // Update queue state
+      await QueueState.update(
+        { 
+          isSendingProcessActive: false,
+          lastUpdated: new Date()
+        },
+        { where: { id: 1 }, transaction }
+      );
 
-      return this.writeDataSync(data);
-    } finally {
-      this.releaseLock();
+      await transaction.commit();
+      return true;
+    } catch (error) {
+      await transaction.rollback();
+      console.error('Error cleaning up queue:', error);
+      return false;
     }
   }
 
   public async clearAllData(): Promise<boolean> {
-    const lockAcquired = await this.acquireLock();
-    if (!lockAcquired) return false;
-
+    await this.ensureInitialized();
+    
+    const transaction: Transaction = await sequelize.transaction();
+    
     try {
-      return this.writeDataSync(this.defaultData);
-    } finally {
-      this.releaseLock();
+      await Recipient.destroy({
+        where: {},
+        transaction,
+      });
+
+      await QueueState.update(
+        { 
+          isSendingProcessActive: false,
+          lastUpdated: new Date()
+        },
+        { where: { id: 1 }, transaction }
+      );
+
+      await transaction.commit();
+      return true;
+    } catch (error) {
+      await transaction.rollback();
+      console.error('Error clearing all data:', error);
+      return false;
     }
   }
 
-  // Backup and restore functionality
-  public createBackup(): string | null {
+  // Backup functionality
+  public async createBackup(): Promise<string | null> {
+    await this.ensureInitialized();
+    
     try {
-      const data = this.readDataSync();
+      const queueState = await this.getQueueState();
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const backupFile = path.join(this.dataDir, `email-queue-backup-${timestamp}.json`);
+      const backupData = {
+        ...queueState,
+        backupTimestamp: timestamp,
+      };
+
+      // You could save this to a file or another database table
+      // For now, we'll just return a JSON string representation
+      const backupString = JSON.stringify(backupData, null, 2);
+      console.log('Backup created at:', timestamp);
       
-      fs.writeFileSync(backupFile, JSON.stringify(data, null, 2));
-      return backupFile;
+      return backupString;
     } catch (error) {
       console.error('Failed to create backup:', error);
       return null;
@@ -244,7 +304,105 @@ class EmailQueueStorage {
   }
 
   public getDataFilePath(): string {
-    return this.dataFile;
+    return 'MySQL Database - No file path';
+  }
+
+  // Additional utility methods
+  public async getQueueStats(): Promise<{
+    total: number;
+    pending: number;
+    sending: number;
+    sent: number;
+    failed: number;
+    isSending: boolean;
+  }> {
+    await this.ensureInitialized();
+    
+    try {
+      const [statusCounts, queueState] = await Promise.all([
+        Recipient.findAll({
+          attributes: [
+            'status',
+            [sequelize.fn('COUNT', sequelize.col('id')), 'count'],
+          ],
+          group: ['status'],
+          raw: true,
+        }),
+        QueueState.findByPk(1),
+      ]);
+
+      const stats = {
+        total: 0,
+        pending: 0,
+        sending: 0,
+        sent: 0,
+        failed: 0,
+        isSending: queueState?.isSendingProcessActive || false,
+      };
+
+      statusCounts.forEach((row: any) => {
+        const count = parseInt(row.count);
+        stats.total += count;
+        
+        switch (row.status) {
+          case SendStatus.PENDING:
+            stats.pending = count;
+            break;
+          case SendStatus.SENDING:
+            stats.sending = count;
+            break;
+          case SendStatus.SENT:
+            stats.sent = count;
+            break;
+          case SendStatus.FAILED:
+            stats.failed = count;
+            break;
+        }
+      });
+
+      return stats;
+    } catch (error) {
+      console.error('Error getting queue stats:', error);
+      return {
+        total: 0,
+        pending: 0,
+        sending: 0,
+        sent: 0,
+        failed: 0,
+        isSending: false,
+      };
+    }
+  }
+
+  public async retryFailedEmails(): Promise<{ success: boolean; message: string; updatedCount: number }> {
+    await this.ensureInitialized();
+    
+    try {
+      const [updatedCount] = await Recipient.update(
+        { status: SendStatus.PENDING },
+        { where: { status: SendStatus.FAILED } }
+      );
+
+      if (updatedCount > 0) {
+        await QueueState.update(
+          { lastUpdated: new Date() },
+          { where: { id: 1 } }
+        );
+      }
+
+      return {
+        success: updatedCount > 0,
+        message: `Reset ${updatedCount} failed emails to pending status`,
+        updatedCount: Number(updatedCount),
+      };
+    } catch (error) {
+      console.error('Error retrying failed emails:', error);
+      return {
+        success: false,
+        message: 'Failed to retry failed emails',
+        updatedCount: 0,
+      };
+    }
   }
 }
 
