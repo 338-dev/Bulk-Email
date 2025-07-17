@@ -35,14 +35,14 @@ class EmailQueueStorage {
     await this.ensureInitialized();
     
     try {
-      const [recipients, queueState] = await Promise.all([
+      const [recipients, queueState]:[any,any] = await Promise.all([
         Recipient.findAll({
           order: [['createdAt', 'ASC']],
         }),
         QueueState.findByPk(1),
       ]);
 
-      const recipientList: RecipientType[] = recipients.map(r => ({
+      const recipientList: RecipientType[] = recipients.map((r: any) => ({
         id: r.id,
         email: r.email,
         name: r.name,
@@ -50,7 +50,7 @@ class EmailQueueStorage {
       }));
 
       const statuses: StatusMap = {};
-      recipients.forEach(r => {
+      recipients.forEach((r:any) => {
         statuses[r.id] = r.status;
       });
 
@@ -73,7 +73,7 @@ class EmailQueueStorage {
         order: [['createdAt', 'ASC']],
       });
 
-      return recipients.map(r => ({
+      return recipients.map((r:any) => ({
         id: r.id,
         email: r.email,
         name: r.name,
@@ -94,7 +94,7 @@ class EmailQueueStorage {
       });
 
       const statuses: StatusMap = {};
-      recipients.forEach(r => {
+      recipients.forEach((r:any) => {
         statuses[r.id] = r.status;
       });
 
@@ -109,7 +109,7 @@ class EmailQueueStorage {
     await this.ensureInitialized();
     
     try {
-      const queueState = await QueueState.findByPk(1);
+      const queueState: any = await QueueState.findByPk(1);
       return queueState?.isSendingProcessActive || false;
     } catch (error) {
       console.error('Error checking sending status:', error);
@@ -135,7 +135,7 @@ class EmailQueueStorage {
         transaction,
       });
 
-      const existingEmailSet = new Set(existingEmails.map(r => r.email.toLowerCase()));
+      const existingEmailSet = new Set(existingEmails.map((r:any) => r.email.toLowerCase()));
       
       const uniqueNewRecipients = newRecipients
         .filter(r => !existingEmailSet.has(r.email.toLowerCase()))
@@ -319,7 +319,7 @@ class EmailQueueStorage {
     await this.ensureInitialized();
     
     try {
-      const [statusCounts, queueState] = await Promise.all([
+      const [statusCounts, queueState]: [any,any] = await Promise.all([
         Recipient.findAll({
           attributes: [
             'status',
